@@ -19,8 +19,10 @@ import (
 )
 
 func main() {
-	const op = "telecom.cmd.telecom.main"
+	const op = "2d2.cmd.2d2.main"
+
 	cfg := config.MustLoad()
+
 	logger := slogpretty.SetupPrettyLogger()
 	log := logger.With(slog.String("op", op))
 
@@ -49,7 +51,9 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+
 	go runBilling(ctx, repository, log)
+
 	go func() {
 		log.Info("server is started on " + address)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

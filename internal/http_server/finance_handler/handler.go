@@ -13,7 +13,7 @@ import (
 	"telecom/internal/service/finance"
 )
 
-const op = "telecom.internal.http_server.finance_handler"
+const op = "2d2.internal.http_server.finance_handler"
 
 type Handler struct {
 	log     *slog.Logger

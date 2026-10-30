@@ -14,7 +14,7 @@ import (
 	"telecom/internal/repository/postgres"
 )
 
-const op = "telecom.internal.service.finance"
+const op = "2d2.internal.service.finance"
 
 var keyRE = regexp.MustCompile(`^[A-Za-z0-9_-]{8,100}$`)
 

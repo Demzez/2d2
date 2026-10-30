@@ -25,7 +25,7 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-const op = "telecom.internal.service.auth"
+const op = "2d2.internal.service.auth"
 
 var phoneRE = regexp.MustCompile(`^\+[1-9][0-9]{7,14}$`)
 var loginRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{3,50}$`)

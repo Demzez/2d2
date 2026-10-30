@@ -12,7 +12,7 @@ import (
 	"telecom/internal/service/auth"
 )
 
-const op = "telecom.internal.http_server.auth_handler"
+const op = "2d2.internal.http_server.auth_handler"
 
 type Handler struct {
 	log      *slog.Logger

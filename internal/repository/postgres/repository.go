@@ -12,7 +12,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const op = "telecom.internal.repository.postgres"
+const op = "2d2.internal.repository.postgres"
 
 type Repository struct {
 	db *sql.DB

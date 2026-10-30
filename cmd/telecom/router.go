@@ -61,7 +61,7 @@ func createRouter(logger *slog.Logger, cfg *config.Config, services Services) ch
 		r.Group(func(r chi.Router) {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-					const op = "telecom.cmd.telecom.createRouter.authorize"
+					const op = "2d2.cmd.2d2.createRouter.authorize"
 					bearer := req.Header.Get("Authorization")
 					if !strings.HasPrefix(bearer, "Bearer ") {
 						common.HandleError(logger.With(slog.String("op", op)), w, object.NewError(401, "UNAUTHORIZED", "Требуется Bearer-токен"))

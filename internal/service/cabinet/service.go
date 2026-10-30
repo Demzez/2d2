@@ -11,7 +11,7 @@ import (
 	"telecom/internal/service/auth"
 )
 
-const op = "telecom.internal.service.cabinet"
+const op = "2d2.internal.service.cabinet"
 
 type Repository interface {
 	ReadMe(context.Context, int64) (json.RawMessage, error)

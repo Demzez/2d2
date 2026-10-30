@@ -10,7 +10,7 @@ import (
 	"telecom/internal/service/cabinet"
 )
 
-const op = "telecom.internal.http_server.cabinet_handler"
+const op = "2d2.internal.http_server.cabinet_handler"
 
 type Handler struct {
 	log     *slog.Logger
