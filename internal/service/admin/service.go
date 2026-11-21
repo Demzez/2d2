@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"telecom/internal/object"
 	"telecom/internal/repository/postgres"
@@ -192,7 +193,7 @@ func (s *Service) CreateTariff(ctx context.Context, req CreateTariffRequest) (js
 	}
 	code := strings.TrimSpace(*req.Code)
 	name := strings.TrimSpace(*req.Name)
-	if !validTariffCode(code) || len(name) == 0 || len(name) > 120 {
+	if !validTariffCode(code) || utf8.RuneCountInString(name) == 0 || utf8.RuneCountInString(name) > 120 {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Некорректный код или название тарифа")
 	}
 	if !validMoneyNonNegative(*req.MonthlyFeeBYN) || *req.IncludedInternetMB < 0 {
@@ -240,7 +241,7 @@ func (s *Service) UpdateTariff(ctx context.Context, id int64, req UpdateTariffRe
 	}
 	if req.Name != nil {
 		n := strings.TrimSpace(*req.Name)
-		if len(n) == 0 || len(n) > 120 {
+		if utf8.RuneCountInString(n) == 0 || utf8.RuneCountInString(n) > 120 {
 			return nil, object.NewError(400, "VALIDATION_ERROR", "Некорректное название тарифа")
 		}
 		patch.Name = &n
@@ -286,7 +287,7 @@ func validMetric(m string) bool {
 }
 
 func validateServiceConsistency(row postgres.AdminServiceRow) error {
-	if !codeRE.MatchString(row.Code) || len(row.Name) == 0 || len(row.Name) > 150 {
+	if !codeRE.MatchString(row.Code) || utf8.RuneCountInString(row.Name) == 0 || utf8.RuneCountInString(row.Name) > 150 {
 		return object.NewError(400, "VALIDATION_ERROR", "Некорректный код или название услуги")
 	}
 	if !validCategory(row.Category) {

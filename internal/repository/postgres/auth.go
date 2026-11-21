@@ -174,7 +174,7 @@ func (r *Repository) CreateAccount(ctx context.Context, login, fullName, email, 
 	}
 	var subID int64
 	err = tx.QueryRowContext(ctx, `INSERT INTO telecom.subscribers(user_id, msisdn, account_number, tariff_id, nickname)
-		VALUES ($1, $2, '2D2-' || lpad(nextval('telecom.account_numbers_seq')::text, 6, '0'), $3, 'Мой номер') RETURNING id`, userID, phone, tariffID).Scan(&subID)
+	VALUES ($1, $2, '2D2-' || lpad(($1::bigint)::text, 6, '0'), $3, 'Мой номер') RETURNING id`, userID, phone, tariffID).Scan(&subID)
 	if err != nil {
 		return nil, 0, uniqueOrError(op, err)
 	}

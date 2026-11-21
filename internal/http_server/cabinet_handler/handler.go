@@ -244,7 +244,7 @@ func (h *Handler) GetPayments() http.HandlerFunc {
 func (h *Handler) GetUsageDetails() http.HandlerFunc {
 	return common.Wrap(h.log, op+".GetUsageDetails()", func(_ http.ResponseWriter, r *http.Request) (any, int, error) {
 		q := r.URL.Query()
-		loc, _ := time.LoadLocation("Europe/Minsk")
+		loc := cabinet.MinskLocation()
 		to := time.Now().In(loc).Format("2006-01-02")
 		from := time.Now().In(loc).AddDate(0, -1, 0).Format("2006-01-02")
 		if q.Has("from") {

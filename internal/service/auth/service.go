@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
 	"telecom/internal/http_server/common"
 	"time"
+	"unicode/utf8"
 
 	"telecom/internal/config"
 	"telecom/internal/object"
@@ -114,14 +116,11 @@ func (s *Service) RequestOTP(ctx context.Context, phone, purpose string) error {
 		return fmt.Errorf("%s | phone lookup failed: %w", op, err)
 	}
 	canDeliver := (purpose == "login" && exists && existingRole == "user") || (purpose == "register" && !exists)
-	b, err := randomBytes(4)
+	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
 	if err != nil {
 		return fmt.Errorf("%s | OTP generation failed: %w", op, err)
 	}
-	code := fmt.Sprintf("%06d", uint64(b[0])<<24|uint64(b[1])<<16|uint64(b[2])<<8|uint64(b[3]))
-	if len(code) > 6 {
-		code = code[len(code)-6:]
-	}
+	code := fmt.Sprintf("%06d", n.Int64())
 	if err := s.rep.CreateOTP(ctx, phone, purpose, s.otpHash(phone, purpose, code)); err != nil {
 		return fmt.Errorf("%s | OTP creation failed: %w", op, err)
 	}
@@ -174,7 +173,7 @@ type Registration struct {
 
 func (s *Service) Register(ctx context.Context, data Registration) (map[string]any, error) {
 	const op = op + ".Register()"
-	if !loginRE.MatchString(data.Login) || !ValidPhone(data.Phone) || len(strings.TrimSpace(data.FullName)) < 2 || len(data.FullName) > 150 || len(data.Password) < 8 || len(data.Password) > 128 || (len(data.OTPCode) != 6 || !onlyDigits(data.OTPCode)) || !data.PrivacyAccepted || (data.Email != "" && (!strings.Contains(data.Email, "@") || len(data.Email) > 254)) {
+	if !loginRE.MatchString(data.Login) || !ValidPhone(data.Phone) || len(strings.TrimSpace(data.FullName)) < 2 || utf8.RuneCountInString(strings.TrimSpace(data.FullName)) > 150 || len(data.Password) < 8 || len(data.Password) > 128 || (len(data.OTPCode) != 6 || !onlyDigits(data.OTPCode)) || !data.PrivacyAccepted || (data.Email != "" && (!strings.Contains(data.Email, "@") || len(data.Email) > 254)) {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Некорректные данные регистрации")
 	}
 	passwordHash, err := hashPassword(data.Password)

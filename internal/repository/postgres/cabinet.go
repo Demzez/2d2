@@ -121,10 +121,14 @@ func (r *Repository) UpdateService(ctx context.Context, subscriberID, serviceID 
 	}
 	defer tx.Rollback()
 
-	var blocked, adminBlocked bool
-	if err := tx.QueryRowContext(ctx, `SELECT is_blocked, admin_blocked FROM telecom.subscribers WHERE id = $1 FOR UPDATE`, subscriberID).Scan(&blocked, &adminBlocked); err != nil {
+	var blocked bool
+	if err := tx.QueryRowContext(ctx,
+		`SELECT (is_blocked OR admin_blocked) FROM telecom.subscribers WHERE id = $1 FOR UPDATE`,
+		subscriberID,
+	).Scan(&blocked); err != nil {
 		return nil, fmt.Errorf("%s | subscriber lock failed: %w", op, err)
 	}
+
 	var active bool
 	if err := tx.QueryRowContext(ctx, `SELECT is_active FROM telecom.services WHERE id = $1`, serviceID).Scan(&active); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -132,24 +136,33 @@ func (r *Repository) UpdateService(ctx context.Context, subscriberID, serviceID 
 		}
 		return nil, fmt.Errorf("%s | service lookup failed: %w", op, err)
 	}
-	if enabled && !active {
-		return nil, object.NewError(409, "CONFLICT", "Услуга недоступна")
-	}
-	if enabled && (blocked || adminBlocked) {
-		return nil, object.NewError(409, "NUMBER_BLOCKED", "Номер заблокирован")
+
+	var existingConnectedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT connected_at FROM telecom.subscriber_services
+		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL ORDER BY id DESC LIMIT 1`, subscriberID, serviceID).Scan(&existingConnectedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%s | existing connection lookup failed: %w", op, err)
 	}
 
 	if enabled {
-		_, err = tx.ExecContext(ctx, `INSERT INTO telecom.subscriber_services(subscriber_id, service_id)
-		SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM telecom.subscriber_services
-		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL)`, subscriberID, serviceID)
+		if !existingConnectedAt.Valid {
+			if !active {
+				return nil, object.NewError(409, "CONFLICT", "Услуга недоступна")
+			}
+			if blocked {
+				return nil, object.NewError(409, "NUMBER_BLOCKED", "Номер заблокирован")
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO telecom.subscriber_services(subscriber_id, service_id) VALUES ($1, $2)`, subscriberID, serviceID); err != nil {
+				return nil, fmt.Errorf("%s | service connection failed: %w", op, err)
+			}
+		}
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE telecom.subscriber_services SET disconnected_at = now()
-		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL`, subscriberID, serviceID)
+		if _, err = tx.ExecContext(ctx, `UPDATE telecom.subscriber_services SET disconnected_at = now()
+			WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL`, subscriberID, serviceID); err != nil {
+			return nil, fmt.Errorf("%s | service disconnection failed: %w", op, err)
+		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("%s | service connection failed: %w", op, err)
-	}
+
 	var connectedAt sql.NullTime
 	if err := tx.QueryRowContext(ctx, `SELECT connected_at FROM telecom.subscriber_services
 		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL ORDER BY id DESC LIMIT 1`, subscriberID, serviceID).Scan(&connectedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -193,10 +206,18 @@ func (r *Repository) ReadDashboard(ctx context.Context, subscriberID int64, mont
 		SELECT count(*) FILTER (WHERE kind = 'alert') AS alerts, count(*) FILTER (WHERE kind = 'message') AS messages
 		FROM telecom.notifications WHERE subscriber_id = $1 AND read_at IS NULL
 	), recommendations AS (
-		SELECT coalesce(json_agg(json_build_object('type', 'service', 'id', id, 'title', name, 'tag', 'popular') ORDER BY id), '[]'::json) AS items
-		FROM (SELECT id, name FROM telecom.services WHERE is_active AND is_featured AND id NOT IN
-		(SELECT service_id FROM telecom.subscriber_services WHERE subscriber_id = $1 AND disconnected_at IS NULL)
-		ORDER BY id LIMIT 3) recommended
+		SELECT coalesce(json_agg(json_build_object('type', item_type, 'id', id, 'title', name, 'tag', 'popular') ORDER BY ord, id), '[]'::json) AS items
+		FROM (
+			(SELECT 1 AS ord, 'service'::text AS item_type, id, name FROM telecom.services
+			 WHERE is_active AND is_featured AND id NOT IN
+			 (SELECT service_id FROM telecom.subscriber_services WHERE subscriber_id = $1 AND disconnected_at IS NULL)
+			 ORDER BY id LIMIT 3)
+			UNION ALL
+			(SELECT 2 AS ord, 'tariff'::text AS item_type, id, name FROM telecom.tariffs
+			 WHERE is_active AND is_featured AND id <> (SELECT tariff_id FROM sub)
+			 ORDER BY id LIMIT 3)
+			ORDER BY ord, id LIMIT 3
+		) recommended
 	)
 	SELECT json_build_object(
 		'balance_byn', sub.balance_byn::text, 'balance_updated_at', sub.updated_at,

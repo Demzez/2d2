@@ -345,8 +345,8 @@ func (r *Repository) RunBilling(ctx context.Context, month string) error {
 	}
 	// No simulated usage or service activation is inserted.
 	_, err = tx.ExecContext(ctx, `INSERT INTO telecom.charges(subscriber_id, period_start, charge_type, description, amount_byn, vat_byn)
-		SELECT s.id, ($1 || '-01')::date, 'service', v.name, v.monthly_fee_byn,
-		round(v.monthly_fee_byn * 0.20,2)
+		SELECT DISTINCT ON (s.id, v.id) s.id, ($1 || '-01')::date, 'service', v.name, v.monthly_fee_byn,
+		round(v.monthly_fee_byn * 0.20, 2)
 		FROM telecom.subscribers s JOIN telecom.subscriber_services ss ON ss.subscriber_id = s.id
 		JOIN telecom.services v ON v.id = ss.service_id
 		WHERE v.monthly_fee_byn > 0
@@ -354,7 +354,8 @@ func (r *Repository) RunBilling(ctx context.Context, month string) error {
 		AND ss.connected_at < ((($1 || '-01')::date + interval '1 month') AT TIME ZONE 'Europe/Minsk')
 		AND (ss.disconnected_at IS NULL OR ss.disconnected_at >= (($1 || '-01')::date AT TIME ZONE 'Europe/Minsk'))
 		AND NOT EXISTS (SELECT 1 FROM telecom.charges c WHERE c.subscriber_id = s.id
-		AND c.period_start = ($1 || '-01')::date AND c.charge_type = 'service' AND c.description = v.name)`, month)
+		AND c.period_start = ($1 || '-01')::date AND c.charge_type = 'service' AND c.description = v.name)
+		ORDER BY s.id, v.id, ss.id DESC`, month)
 	if err != nil {
 		return fmt.Errorf("%s | service charges failed: %w", op, err)
 	}

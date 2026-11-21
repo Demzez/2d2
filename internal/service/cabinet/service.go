@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"telecom/internal/object"
 	"telecom/internal/service/auth"
@@ -41,9 +42,16 @@ type Service struct{ rep Repository }
 
 func NewService(rep Repository) *Service { return &Service{rep: rep} }
 
+func MinskLocation() *time.Location {
+	loc, err := time.LoadLocation("Europe/Minsk")
+	if err != nil {
+		return time.FixedZone("Europe/Minsk", 3*60*60)
+	}
+	return loc
+}
+
 func MonthNow() string {
-	loc, _ := time.LoadLocation("Europe/Minsk")
-	return time.Now().In(loc).Format("2006-01")
+	return time.Now().In(MinskLocation()).Format("2006-01")
 }
 
 func (s *Service) GetMe(ctx context.Context, id int64) (json.RawMessage, error) {
@@ -58,8 +66,12 @@ func (s *Service) ChangeMe(ctx context.Context, id int64, name, email *string) (
 	if name == nil && email == nil {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Укажите поле для обновления")
 	}
-	if name != nil && (len(strings.TrimSpace(*name)) < 2 || len(*name) > 150) {
-		return nil, object.NewError(400, "VALIDATION_ERROR", "Некорректное имя")
+	if name != nil {
+		trimmed := strings.TrimSpace(*name)
+		if utf8.RuneCountInString(trimmed) < 2 || utf8.RuneCountInString(trimmed) > 150 {
+			return nil, object.NewError(400, "VALIDATION_ERROR", "Некорректное имя")
+		}
+		name = &trimmed
 	}
 	if email != nil && (*email != "" && (!strings.Contains(*email, "@") || len(*email) > 254)) {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Некорректный email")
@@ -75,7 +87,7 @@ func (s *Service) ChangeNumber(ctx context.Context, id int64, nickname *string, 
 	if nickname == nil && blocked == nil {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Укажите поле для обновления")
 	}
-	if nickname != nil && len(*nickname) > 100 {
+	if nickname != nil && utf8.RuneCountInString(*nickname) > 100 {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Слишком длинное название")
 	}
 	value, err := s.rep.UpdateNumber(ctx, id, nickname, blocked)
@@ -152,7 +164,7 @@ func (s *Service) GetFavorites(ctx context.Context, id int64) (json.RawMessage, 
 }
 
 func validContact(name string, phone string) bool {
-	return len(strings.TrimSpace(name)) > 0 && len(name) <= 100 && auth.ValidPhone(phone)
+	return len(strings.TrimSpace(name)) > 0 && utf8.RuneCountInString(name) <= 100 && auth.ValidPhone(phone)
 }
 
 func (s *Service) SaveFavorite(ctx context.Context, id int64, name, phone string) (json.RawMessage, error) {
@@ -170,8 +182,12 @@ func (s *Service) ChangeFavorite(ctx context.Context, subID, id int64, name, pho
 	if name == nil && phone == nil {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Укажите поле для обновления")
 	}
-	if name != nil && (len(strings.TrimSpace(*name)) == 0 || len(*name) > 100) {
-		return nil, object.NewError(400, "VALIDATION_ERROR", "Неверное имя")
+	if name != nil {
+		trimmed := strings.TrimSpace(*name)
+		if utf8.RuneCountInString(trimmed) == 0 || utf8.RuneCountInString(trimmed) > 100 {
+			return nil, object.NewError(400, "VALIDATION_ERROR", "Неверное имя")
+		}
+		name = &trimmed
 	}
 	if phone != nil && !auth.ValidPhone(*phone) {
 		return nil, object.NewError(400, "VALIDATION_ERROR", "Неверный телефон")
