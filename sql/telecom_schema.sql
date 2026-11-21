@@ -257,49 +257,4 @@ CREATE INDEX IF NOT EXISTS ix_notifications_subscriber_time
 CREATE INDEX IF NOT EXISTS ix_notifications_unread
     ON notifications(subscriber_id, kind) WHERE read_at IS NULL;
 
--- Минимальный справочник для первого запуска приложения.
--- Это данные каталога, НЕ тестовые пользователи, платежи или показания потребления.
-INSERT INTO tariffs (code, name, description, monthly_fee_byn, included_internet_mb, is_featured)
-VALUES ('comfort-s', 'Комфорт S', 'Базовый тариф с 10 ГБ интернета', 12.50, 10240, TRUE)
-ON CONFLICT (code) DO NOTHING;
-
-INSERT INTO services (code, name, description, category, monthly_fee_byn,
-                      quota_metric, quota_amount, is_unlimited, is_featured)
-VALUES
-    ('internet-unlimited-5', 'Безлимитный интернет до 5 Мбит/с',
-     'Интернет без ограничения объёма на скорости до 5 Мбит/с', 'internet',
-     15.99, 'internet_mb', NULL, TRUE, TRUE),
-    ('messengers-unlimited', 'Безлимит на мессенджеры',
-     'Безлимитный трафик популярных мессенджеров', 'messengers',
-     0.00, 'messenger_mb', NULL, TRUE, TRUE),
-    ('calls-other-60', '60 минут в другие сети',
-     '60 минут разговоров в месяц с абонентами других сетей', 'calls',
-     0.00, 'minutes_other', 60, FALSE, TRUE),
-    ('calls-own-unlimited', 'Безлимит минут внутри сети',
-     'Неограниченные звонки внутри сети 2D2', 'calls',
-     0.00, 'minutes_own', NULL, TRUE, FALSE),
-    ('safe-internet', 'Безопасный интернет',
-     'Дополнительная защита при использовании мобильного интернета', 'security',
-     2.90, NULL, NULL, FALSE, FALSE),
-    ('roaming-calls', 'Звонки в роуминге',
-     'Пакет минут для звонков за пределами домашней сети', 'roaming',
-     4.90, 'minutes_roaming', 30, FALSE, TRUE),
-    ('extra-internet-1gb', 'Дополнительный 1 ГБ',
-     'Дополнительный пакет мобильного интернета на месяц', 'internet',
-     3.00, 'internet_mb', 1024, FALSE, FALSE)
-ON CONFLICT (code) DO NOTHING;
-
--- Административные поля версии API 1.2:
--- users.role ограничен значениями user/admin и по умолчанию равен user.
--- subscribers.admin_blocked хранит отдельную блокировку оператора.
--- Эффективная блокировка номера вычисляется backend как:
--- subscribers.is_blocked OR subscribers.admin_blocked.
---
--- Отдельные таблицы для управления каталогом не нужны:
--- тарифы и услуги редактируются непосредственно в tariffs и services.
--- Внешние ключи subscribers.tariff_id, subscriber_services.service_id
--- и usage_events.service_id запрещают удаление используемых записей.
--- Backend должен предварительно проверять ссылки и возвращать 409
--- (TARIFF_IN_USE или SERVICE_IN_USE), как описано в API.
-
 COMMIT;
