@@ -17,26 +17,34 @@ import (
 type LoginRow struct {
 	UserID       int64
 	PasswordHash string
+	Role         string
 }
 
 func (r *Repository) ReadLogin(ctx context.Context, login string) (LoginRow, error) {
 	const op = op + ".ReadLogin()"
 	var row LoginRow
-	err := r.db.QueryRowContext(ctx, `SELECT id, password_hash FROM telecom.users WHERE lower(login) = lower($1)`, login).Scan(&row.UserID, &row.PasswordHash)
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, password_hash, role FROM telecom.users WHERE lower(login) = lower($1)`,
+		login,
+	).Scan(&row.UserID, &row.PasswordHash, &row.Role)
 	if err != nil {
 		return row, fmt.Errorf("%s | reading login failed: %w", op, err)
 	}
 	return row, nil
 }
 
-func (r *Repository) ReadPhoneUser(ctx context.Context, phone string) (int64, error) {
+func (r *Repository) ReadPhoneUser(ctx context.Context, phone string) (int64, string, error) {
 	const op = op + ".ReadPhoneUser()"
 	var id int64
-	err := r.db.QueryRowContext(ctx, `SELECT user_id FROM telecom.subscribers WHERE msisdn = $1`, phone).Scan(&id)
+	var role string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT u.id, u.role FROM telecom.subscribers s JOIN telecom.users u ON u.id = s.user_id WHERE s.msisdn = $1`,
+		phone,
+	).Scan(&id, &role)
 	if err != nil {
-		return 0, fmt.Errorf("%s | reading phone user failed: %w", op, err)
+		return 0, "", fmt.Errorf("%s | reading phone user failed: %w", op, err)
 	}
-	return id, nil
+	return id, role, nil
 }
 
 func (r *Repository) CreateOTP(ctx context.Context, phone, purpose, hash string) error {
@@ -112,13 +120,18 @@ func (r *Repository) VerifyOTP(ctx context.Context, phone, purpose, hash string)
 		return 0, fmt.Errorf("%s | OTP verification failed: %w", op, err)
 	}
 	var userID int64
+	var role string
 	if code == "" {
-		if err = tx.QueryRowContext(ctx, `SELECT user_id FROM telecom.subscribers WHERE msisdn = $1`, phone).Scan(&userID); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				code = "INVALID_OTP"
-			} else {
-				return 0, fmt.Errorf("%s | account lookup failed: %w", op, err)
-			}
+		err = tx.QueryRowContext(ctx,
+			`SELECT u.id, u.role FROM telecom.subscribers s JOIN telecom.users u ON u.id = s.user_id WHERE s.msisdn = $1`,
+			phone,
+		).Scan(&userID, &role)
+		if errors.Is(err, sql.ErrNoRows) {
+			code = "INVALID_OTP"
+		} else if err != nil {
+			return 0, fmt.Errorf("%s | account lookup failed: %w", op, err)
+		} else if role != "user" {
+			code = "INVALID_CREDENTIALS"
 		}
 	}
 	if err = tx.Commit(); err != nil {
@@ -168,7 +181,7 @@ func (r *Repository) CreateAccount(ctx context.Context, login, fullName, email, 
 
 	var data []byte
 	err = tx.QueryRowContext(ctx, `SELECT json_build_object(
-		'user', json_build_object('id', u.id, 'login', u.login, 'full_name', u.full_name),
+		'user', json_build_object('id', u.id, 'login', u.login, 'full_name', u.full_name, 'role', u.role),
 		'account', json_build_object('number', s.msisdn, 'account_number', s.account_number))
 		FROM telecom.users u JOIN telecom.subscribers s ON s.user_id = u.id WHERE u.id = $1`, userID).Scan(&data)
 	if err != nil {
@@ -198,30 +211,37 @@ func (r *Repository) CreateSession(ctx context.Context, userID int64, hash strin
 	return nil
 }
 
-func (r *Repository) UpdateSession(ctx context.Context, oldHash, newHash string) (int64, error) {
+func (r *Repository) UpdateSession(ctx context.Context, oldHash, newHash string) (int64, string, error) {
 	const op = op + ".UpdateSession()"
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("%s | transaction failed: %w", op, err)
+		return 0, "", fmt.Errorf("%s | transaction failed: %w", op, err)
 	}
 	defer tx.Rollback()
 	var userID int64
 	err = tx.QueryRowContext(ctx, `UPDATE telecom.auth_sessions SET revoked_at = now()
 		WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > now() RETURNING user_id`, oldHash).Scan(&userID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, object.NewError(401, "UNAUTHORIZED", "Сессия недействительна")
+		return 0, "", object.NewError(401, "UNAUTHORIZED", "Сессия недействительна")
 	}
 	if err != nil {
-		return 0, fmt.Errorf("%s | session rotation failed: %w", op, err)
+		return 0, "", fmt.Errorf("%s | session rotation failed: %w", op, err)
+	}
+	var role string
+	if err := tx.QueryRowContext(ctx, `SELECT role FROM telecom.users WHERE id = $1`, userID).Scan(&role); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", object.NewError(401, "UNAUTHORIZED", "Пользователь не найден")
+		}
+		return 0, "", fmt.Errorf("%s | reading user role failed: %w", op, err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO telecom.auth_sessions(user_id, token_hash, expires_at)
 		VALUES ($1, $2, now() + interval '30 days')`, userID, newHash); err != nil {
-		return 0, fmt.Errorf("%s | creating rotated session failed: %w", op, err)
+		return 0, "", fmt.Errorf("%s | creating rotated session failed: %w", op, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("%s | commit failed: %w", op, err)
+		return 0, "", fmt.Errorf("%s | commit failed: %w", op, err)
 	}
-	return userID, nil
+	return userID, role, nil
 }
 
 func (r *Repository) DeleteSession(ctx context.Context, hash string) error {

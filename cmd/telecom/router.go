@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"telecom/internal/http_server/admin_handler"
+	"telecom/internal/service/admin"
 
 	"telecom/internal/config"
 	"telecom/internal/http_server/auth_handler"
@@ -23,6 +25,7 @@ type Services struct {
 	auth    *auth.Service
 	cabinet *cabinet.Service
 	finance *finance.Service
+	admin   *admin.Service
 }
 
 func createRouter(logger *slog.Logger, cfg *config.Config, services Services) chi.Router {
@@ -48,6 +51,7 @@ func createRouter(logger *slog.Logger, cfg *config.Config, services Services) ch
 	a := auth_handler.NewHandler(logger, services.auth)
 	c := cabinet_handler.NewHandler(logger, services.cabinet)
 	f := finance_handler.NewHandler(logger, services.finance)
+	adm := admin_handler.NewHandler(logger, services.admin)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/auth/otp/request", a.RequestOTP())
@@ -61,42 +65,82 @@ func createRouter(logger *slog.Logger, cfg *config.Config, services Services) ch
 		r.Group(func(r chi.Router) {
 			r.Use(func(next http.Handler) http.Handler {
 				return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-					const op = "2d2.cmd.2d2.createRouter.authorize"
+					const op = "telecom.cmd.telecom.createRouter.authorize"
 					bearer := req.Header.Get("Authorization")
 					if !strings.HasPrefix(bearer, "Bearer ") {
 						common.HandleError(logger.With(slog.String("op", op)), w, object.NewError(401, "UNAUTHORIZED", "Требуется Bearer-токен"))
 						return
 					}
-					id, err := services.auth.Authorize(req.Context(), strings.TrimSpace(strings.TrimPrefix(bearer, "Bearer ")))
+					principal, err := services.auth.Authorize(req.Context(), strings.TrimSpace(strings.TrimPrefix(bearer, "Bearer ")))
 					if err != nil {
 						common.HandleError(logger.With(slog.String("op", op)), w, err)
 						return
 					}
-					next.ServeHTTP(w, req.WithContext(common.WithSubscriber(req.Context(), id)))
+					next.ServeHTTP(w, req.WithContext(common.WithPrincipal(req.Context(), principal)))
 				})
 			})
-			r.Get("/me", c.GetMe())
-			r.Patch("/me", c.ChangeMe())
-			r.Patch("/number", c.ChangeNumber())
-			r.Get("/dashboard", c.GetDashboard())
-			r.Get("/tariffs", c.GetTariffs())
-			r.Put("/number/tariff", c.ChangeTariff())
-			r.Get("/services", c.GetServices())
-			r.Put("/services/{id}/connection", c.ChangeService())
-			r.Get("/finance/summary", c.GetFinanceSummary())
-			r.Get("/finance/charges", c.GetCharges())
-			r.Get("/finance/invoices", c.GetInvoices())
-			r.Get("/finance/invoices/{id}", c.GetInvoice())
-			r.Get("/finance/payments", c.GetPayments())
-			r.Get("/finance/usage-details", c.GetUsageDetails())
-			r.Post("/finance/topups", f.SaveTopup())
-			r.Get("/analytics", c.GetAnalytics())
-			r.Get("/favorites", c.GetFavorites())
-			r.Post("/favorites", c.SaveFavorite())
-			r.Patch("/favorites/{id}", c.ChangeFavorite())
-			r.Delete("/favorites/{id}", c.RemoveFavorite())
-			r.Get("/notifications", c.GetNotifications())
-			r.Patch("/notifications/{id}/read", c.ChangeNotification())
+
+			// Маршруты личного кабинета абонента (требуют привязанный номер)
+			r.Group(func(r chi.Router) {
+				r.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+						const op = "telecom.cmd.telecom.createRouter.requireSubscriber"
+						if common.Subscriber(req) < 1 {
+							common.HandleError(logger.With(slog.String("op", op)), w, object.NewError(403, "FORBIDDEN", "Учётная запись не привязана к абоненту"))
+							return
+						}
+						next.ServeHTTP(w, req)
+					})
+				})
+				r.Get("/me", c.GetMe())
+				r.Patch("/me", c.ChangeMe())
+				r.Patch("/number", c.ChangeNumber())
+				r.Get("/dashboard", c.GetDashboard())
+				r.Get("/tariffs", c.GetTariffs())
+				r.Put("/number/tariff", c.ChangeTariff())
+				r.Get("/services", c.GetServices())
+				r.Put("/services/{id}/connection", c.ChangeService())
+				r.Get("/finance/summary", c.GetFinanceSummary())
+				r.Get("/finance/charges", c.GetCharges())
+				r.Get("/finance/invoices", c.GetInvoices())
+				r.Get("/finance/invoices/{id}", c.GetInvoice())
+				r.Get("/finance/payments", c.GetPayments())
+				r.Get("/finance/usage-details", c.GetUsageDetails())
+				r.Post("/finance/topups", f.SaveTopup())
+				r.Get("/analytics", c.GetAnalytics())
+				r.Get("/favorites", c.GetFavorites())
+				r.Post("/favorites", c.SaveFavorite())
+				r.Patch("/favorites/{id}", c.ChangeFavorite())
+				r.Delete("/favorites/{id}", c.RemoveFavorite())
+				r.Get("/notifications", c.GetNotifications())
+				r.Patch("/notifications/{id}/read", c.ChangeNotification())
+			})
+
+			// Административные маршруты (12 методов)
+			r.Route("/admin", func(r chi.Router) {
+				r.Use(func(next http.Handler) http.Handler {
+					return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+						const op = "telecom.cmd.telecom.createRouter.requireAdmin"
+						if common.Role(req) != "admin" {
+							common.HandleError(logger.With(slog.String("op", op)), w, object.NewError(403, "FORBIDDEN", "Доступ разрешён только администратору"))
+							return
+						}
+						next.ServeHTTP(w, req)
+					})
+				})
+				r.Get("/overview", adm.GetOverview())
+				r.Get("/subscribers", adm.GetSubscribers())
+				r.Get("/subscribers/{id}", adm.GetSubscriber())
+				r.Patch("/subscribers/{id}/block", adm.BlockSubscriber())
+				r.Get("/tariffs", adm.GetTariffs())
+				r.Post("/tariffs", adm.CreateTariff())
+				r.Patch("/tariffs/{id}", adm.UpdateTariff())
+				r.Delete("/tariffs/{id}", adm.DeleteTariff())
+				r.Get("/services", adm.GetServices())
+				r.Post("/services", adm.CreateService())
+				r.Patch("/services/{id}", adm.UpdateService())
+				r.Delete("/services/{id}", adm.DeleteService())
+			})
 		})
 	})
 	return r

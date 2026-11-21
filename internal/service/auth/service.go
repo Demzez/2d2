@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"telecom/internal/http_server/common"
 	"time"
 
 	"telecom/internal/config"
@@ -32,14 +33,21 @@ var loginRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{3,50}$`)
 
 type Repository interface {
 	ReadLogin(context.Context, string) (postgres.LoginRow, error)
-	ReadPhoneUser(context.Context, string) (int64, error)
-	ReadSubscriberID(context.Context, int64) (int64, error)
+	ReadPhoneUser(context.Context, string) (int64, string, error)
+	ReadPrincipal(context.Context, int64) (int64, string, error)
 	CreateOTP(context.Context, string, string, string) error
 	VerifyOTP(context.Context, string, string, string) (int64, error)
 	CreateAccount(context.Context, string, string, string, string, string, string) (json.RawMessage, int64, error)
 	CreateSession(context.Context, int64, string) error
-	UpdateSession(context.Context, string, string) (int64, error)
+	UpdateSession(context.Context, string, string) (int64, string, error)
 	DeleteSession(context.Context, string) error
+}
+
+type Tokens struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	Role         string `json:"role"`
 }
 
 type Service struct {
@@ -49,12 +57,6 @@ type Service struct {
 
 func NewService(rep Repository, cfg *config.Config) *Service {
 	return &Service{rep: rep, cfg: cfg}
-}
-
-type Tokens struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int    `json:"expires_in"`
 }
 
 func ValidPhone(phone string) bool { return phoneRE.MatchString(phone) }
@@ -106,12 +108,12 @@ func (s *Service) RequestOTP(ctx context.Context, phone, purpose string) error {
 		return object.NewError(503, "SMS_UNAVAILABLE", "SMS доступен только в локальном учебном режиме")
 	}
 
-	_, err := s.rep.ReadPhoneUser(ctx, phone)
+	_, existingRole, err := s.rep.ReadPhoneUser(ctx, phone)
 	exists := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%s | phone lookup failed: %w", op, err)
 	}
-	canDeliver := (purpose == "login" && exists) || (purpose == "register" && !exists)
+	canDeliver := (purpose == "login" && exists && existingRole == "user") || (purpose == "register" && !exists)
 	b, err := randomBytes(4)
 	if err != nil {
 		return fmt.Errorf("%s | OTP generation failed: %w", op, err)
@@ -145,7 +147,7 @@ func (s *Service) Login(ctx context.Context, login, password string) (Tokens, er
 	if !checkPassword(password, row.PasswordHash) {
 		return Tokens{}, object.NewError(401, "INVALID_CREDENTIALS", "Неверный логин или пароль")
 	}
-	return s.newTokens(ctx, row.UserID)
+	return s.newTokens(ctx, row.UserID, row.Role)
 }
 
 func (s *Service) VerifyOTP(ctx context.Context, phone, code string) (Tokens, error) {
@@ -157,7 +159,7 @@ func (s *Service) VerifyOTP(ctx context.Context, phone, code string) (Tokens, er
 	if err != nil {
 		return Tokens{}, fmt.Errorf("%s | OTP failed: %w", op, err)
 	}
-	return s.newTokens(ctx, userID)
+	return s.newTokens(ctx, userID, "user")
 }
 
 type Registration struct {
@@ -183,7 +185,7 @@ func (s *Service) Register(ctx context.Context, data Registration) (map[string]a
 	if err != nil {
 		return nil, fmt.Errorf("%s | account creation failed: %w", op, err)
 	}
-	tokens, err := s.newTokens(ctx, userID)
+	tokens, err := s.newTokens(ctx, userID, "user")
 	if err != nil {
 		return nil, err
 	}
@@ -191,13 +193,14 @@ func (s *Service) Register(ctx context.Context, data Registration) (map[string]a
 	if err := json.Unmarshal(account, &response); err != nil {
 		return nil, fmt.Errorf("%s | account decode failed: %w", op, err)
 	}
+	response["role"] = "user"
 	response["access_token"] = tokens.AccessToken
 	response["refresh_token"] = tokens.RefreshToken
 	response["expires_in"] = tokens.ExpiresIn
 	return response, nil
 }
 
-func (s *Service) newTokens(ctx context.Context, userID int64) (Tokens, error) {
+func (s *Service) newTokens(ctx context.Context, userID int64, role string) (Tokens, error) {
 	const op = op + ".newTokens()"
 	refreshBytes, err := randomBytes(32)
 	if err != nil {
@@ -207,17 +210,22 @@ func (s *Service) newTokens(ctx context.Context, userID int64) (Tokens, error) {
 	if err := s.rep.CreateSession(ctx, userID, digest(refresh)); err != nil {
 		return Tokens{}, fmt.Errorf("%s | creating session failed: %w", op, err)
 	}
-	return Tokens{AccessToken: s.signJWT(userID), RefreshToken: refresh, ExpiresIn: 900}, nil
+	return Tokens{
+		AccessToken:  s.signJWT(userID, role),
+		RefreshToken: refresh,
+		ExpiresIn:    900,
+		Role:         role,
+	}, nil
 }
 
-func digest(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
-}
-
-func (s *Service) signJWT(userID int64) string {
+func (s *Service) signJWT(userID int64, role string) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	claims, _ := json.Marshal(map[string]any{"sub": strconv.FormatInt(userID, 10), "exp": time.Now().Add(15 * time.Minute).Unix(), "iat": time.Now().Unix()})
+	claims, _ := json.Marshal(map[string]any{
+		"sub":  strconv.FormatInt(userID, 10),
+		"role": role,
+		"exp":  time.Now().Add(15 * time.Minute).Unix(),
+		"iat":  time.Now().Unix(),
+	})
 	payload := base64.RawURLEncoding.EncodeToString(claims)
 	unsigned := header + "." + payload
 	mac := hmac.New(sha256.New, []byte(s.cfg.JWTSecret))
@@ -225,25 +233,25 @@ func (s *Service) signJWT(userID int64) string {
 	return unsigned + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Service) Authorize(ctx context.Context, token string) (int64, error) {
+func (s *Service) Authorize(ctx context.Context, token string) (common.Principal, error) {
 	const op = op + ".Authorize()"
 	parts := strings.Split(token, ".")
 	unauthorized := object.NewError(http.StatusUnauthorized, "UNAUTHORIZED", "Требуется авторизация")
 	if len(parts) != 3 {
-		return 0, unauthorized
+		return common.Principal{}, unauthorized
 	}
 	mac := hmac.New(sha256.New, []byte(s.cfg.JWTSecret))
 	mac.Write([]byte(parts[0] + "." + parts[1]))
 	actual, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil || !hmac.Equal(actual, mac.Sum(nil)) {
-		return 0, unauthorized
+		return common.Principal{}, unauthorized
 	}
 	if parts[0] != base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`)) {
-		return 0, unauthorized
+		return common.Principal{}, unauthorized
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return 0, unauthorized
+		return common.Principal{}, unauthorized
 	}
 	var claims struct {
 		Sub     string `json:"sub"`
@@ -251,20 +259,20 @@ func (s *Service) Authorize(ctx context.Context, token string) (int64, error) {
 		Issued  int64  `json:"iat"`
 	}
 	if json.Unmarshal(payload, &claims) != nil || claims.Expires <= time.Now().Unix() || claims.Issued > time.Now().Unix()+30 {
-		return 0, unauthorized
+		return common.Principal{}, unauthorized
 	}
 	userID, err := strconv.ParseInt(claims.Sub, 10, 64)
 	if err != nil || userID < 1 {
-		return 0, unauthorized
+		return common.Principal{}, unauthorized
 	}
-	id, err := s.rep.ReadSubscriberID(ctx, userID)
+	subID, role, err := s.rep.ReadPrincipal(ctx, userID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, unauthorized
+		return common.Principal{}, unauthorized
 	}
 	if err != nil {
-		return 0, fmt.Errorf("%s | reading subscriber failed: %w", op, err)
+		return common.Principal{}, fmt.Errorf("%s | reading principal failed: %w", op, err)
 	}
-	return id, nil
+	return common.Principal{UserID: userID, SubscriberID: subID, Role: role}, nil
 }
 
 func (s *Service) Refresh(ctx context.Context, oldToken string) (Tokens, error) {
@@ -277,11 +285,21 @@ func (s *Service) Refresh(ctx context.Context, oldToken string) (Tokens, error) 
 		return Tokens{}, fmt.Errorf("%s | generating token failed: %w", op, err)
 	}
 	fresh := base64.RawURLEncoding.EncodeToString(b)
-	userID, err := s.rep.UpdateSession(ctx, digest(oldToken), digest(fresh))
+	userID, role, err := s.rep.UpdateSession(ctx, digest(oldToken), digest(fresh))
 	if err != nil {
 		return Tokens{}, fmt.Errorf("%s | refreshing session failed: %w", op, err)
 	}
-	return Tokens{AccessToken: s.signJWT(userID), RefreshToken: fresh, ExpiresIn: 900}, nil
+	return Tokens{
+		AccessToken:  s.signJWT(userID, role),
+		RefreshToken: fresh,
+		ExpiresIn:    900,
+		Role:         role,
+	}, nil
+}
+
+func digest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *Service) Logout(ctx context.Context, token string) error {

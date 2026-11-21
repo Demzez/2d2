@@ -54,11 +54,16 @@ func (r *Repository) UpdateJSON(ctx context.Context, query string, args ...any) 
 	return r.ReadJSON(ctx, query, args...)
 }
 
-func (r *Repository) ReadSubscriberID(ctx context.Context, userID int64) (int64, error) {
-	const op = op + ".ReadSubscriberID()"
-	var id int64
-	if err := r.db.QueryRowContext(ctx, `SELECT id FROM telecom.subscribers WHERE user_id = $1`, userID).Scan(&id); err != nil {
-		return 0, fmt.Errorf("%s | subscriber lookup failed: %w", op, err)
+func (r *Repository) ReadPrincipal(ctx context.Context, userID int64) (int64, string, error) {
+	const op = op + ".ReadPrincipal()"
+	var subscriberID sql.NullInt64
+	var role string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT s.id, u.role FROM telecom.users u LEFT JOIN telecom.subscribers s ON s.user_id = u.id WHERE u.id = $1`,
+		userID,
+	).Scan(&subscriberID, &role)
+	if err != nil {
+		return 0, "", fmt.Errorf("%s | principal lookup failed: %w", op, err)
 	}
-	return id, nil
+	return subscriberID.Int64, role, nil
 }

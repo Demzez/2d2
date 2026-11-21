@@ -15,15 +15,29 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-type subscriberKey struct{}
+type Principal struct {
+	UserID       int64
+	SubscriberID int64
+	Role         string
+}
 
-func WithSubscriber(ctx context.Context, id int64) context.Context {
-	return context.WithValue(ctx, subscriberKey{}, id)
+type principalKey struct{}
+
+func WithPrincipal(ctx context.Context, p Principal) context.Context {
+	return context.WithValue(ctx, principalKey{}, p)
+}
+
+func CurrentPrincipal(r *http.Request) Principal {
+	p, _ := r.Context().Value(principalKey{}).(Principal)
+	return p
 }
 
 func Subscriber(r *http.Request) int64 {
-	id, _ := r.Context().Value(subscriberKey{}).(int64)
-	return id
+	return CurrentPrincipal(r).SubscriberID
+}
+
+func Role(r *http.Request) string {
+	return CurrentPrincipal(r).Role
 }
 
 func ID(r *http.Request) (int64, error) {

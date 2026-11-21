@@ -6,17 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/lib/pq"
 	"time"
+
+	"github.com/lib/pq"
 
 	"telecom/internal/object"
 )
 
 func (r *Repository) ReadMe(ctx context.Context, subscriberID int64) (json.RawMessage, error) {
 	const query = `SELECT json_build_object(
-		'user', json_build_object('id', u.id, 'login', u.login, 'full_name', u.full_name, 'email', u.email),
+		'user', json_build_object('id', u.id, 'login', u.login, 'full_name', u.full_name, 'email', u.email, 'role', u.role),
 		'number', json_build_object('id', s.id, 'msisdn', s.msisdn, 'account_number', s.account_number,
-		'nickname', s.nickname, 'is_blocked', s.is_blocked, 'tariff_id', s.tariff_id))
+		'nickname', s.nickname, 'is_blocked', s.is_blocked, 'admin_blocked', s.admin_blocked, 'tariff_id', s.tariff_id))
 		FROM telecom.subscribers s JOIN telecom.users u ON u.id = s.user_id WHERE s.id = $1`
 	return r.ReadJSON(ctx, query, subscriberID)
 }
@@ -27,7 +28,7 @@ func (r *Repository) UpdateMe(ctx context.Context, subscriberID int64, name, ema
 		UPDATE telecom.users SET full_name = COALESCE($2::text, full_name),
 		email = CASE WHEN $3::text IS NULL THEN email ELSE NULLIF($3::text, '') END, updated_at = now()
 		WHERE id = (SELECT user_id FROM telecom.subscribers WHERE id = $1)
-		RETURNING id, login, full_name, email)
+		RETURNING id, login, full_name, email, role)
 		SELECT json_build_object('user', row_to_json(changed)) FROM changed`
 	value, err := r.UpdateJSON(ctx, query, subscriberID, name, email)
 	if err != nil {
@@ -41,11 +42,33 @@ func (r *Repository) UpdateMe(ctx context.Context, subscriberID int64, name, ema
 }
 
 func (r *Repository) UpdateNumber(ctx context.Context, subscriberID int64, nickname *string, blocked *bool) (json.RawMessage, error) {
-	const query = `WITH changed AS (UPDATE telecom.subscribers
+	const op = op + ".UpdateNumber()"
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("%s | transaction failed: %w", op, err)
+	}
+	defer tx.Rollback()
+
+	var adminBlocked bool
+	if err := tx.QueryRowContext(ctx, `SELECT admin_blocked FROM telecom.subscribers WHERE id = $1 FOR UPDATE`, subscriberID).Scan(&adminBlocked); err != nil {
+		return nil, fmt.Errorf("%s | locking subscriber failed: %w", op, err)
+	}
+	if blocked != nil && !*blocked && adminBlocked {
+		return nil, object.NewError(403, "ADMIN_BLOCKED", "Номер заблокирован администратором")
+	}
+
+	var data []byte
+	err = tx.QueryRowContext(ctx, `WITH changed AS (UPDATE telecom.subscribers
 		SET nickname = COALESCE($2::text, nickname), is_blocked = COALESCE($3::boolean, is_blocked), updated_at = now()
-		WHERE id = $1 RETURNING msisdn, nickname, is_blocked)
-		SELECT json_build_object('number', row_to_json(changed)) FROM changed`
-	return r.UpdateJSON(ctx, query, subscriberID, nickname, blocked)
+		WHERE id = $1 RETURNING msisdn, nickname, is_blocked, admin_blocked)
+		SELECT json_build_object('number', row_to_json(changed)) FROM changed`, subscriberID, nickname, blocked).Scan(&data)
+	if err != nil {
+		return nil, fmt.Errorf("%s | updating number failed: %w", op, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("%s | commit failed: %w", op, err)
+	}
+	return json.RawMessage(data), nil
 }
 
 func (r *Repository) ReadTariffs(ctx context.Context, subscriberID int64) (json.RawMessage, error) {
@@ -97,10 +120,15 @@ func (r *Repository) UpdateService(ctx context.Context, subscriberID, serviceID 
 		return nil, fmt.Errorf("%s | transaction failed: %w", op, err)
 	}
 	defer tx.Rollback()
+
 	var blocked bool
-	if err := tx.QueryRowContext(ctx, `SELECT is_blocked FROM telecom.subscribers WHERE id = $1 FOR UPDATE`, subscriberID).Scan(&blocked); err != nil {
+	if err := tx.QueryRowContext(ctx,
+		`SELECT (is_blocked OR admin_blocked) FROM telecom.subscribers WHERE id = $1 FOR UPDATE`,
+		subscriberID,
+	).Scan(&blocked); err != nil {
 		return nil, fmt.Errorf("%s | subscriber lock failed: %w", op, err)
 	}
+
 	var active bool
 	if err := tx.QueryRowContext(ctx, `SELECT is_active FROM telecom.services WHERE id = $1`, serviceID).Scan(&active); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -108,24 +136,33 @@ func (r *Repository) UpdateService(ctx context.Context, subscriberID, serviceID 
 		}
 		return nil, fmt.Errorf("%s | service lookup failed: %w", op, err)
 	}
-	if enabled && !active {
-		return nil, object.NewError(409, "CONFLICT", "Услуга недоступна")
-	}
-	if enabled && blocked {
-		return nil, object.NewError(409, "NUMBER_BLOCKED", "Номер заблокирован")
+
+	var existingConnectedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT connected_at FROM telecom.subscriber_services
+		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL ORDER BY id DESC LIMIT 1`, subscriberID, serviceID).Scan(&existingConnectedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%s | existing connection lookup failed: %w", op, err)
 	}
 
 	if enabled {
-		_, err = tx.ExecContext(ctx, `INSERT INTO telecom.subscriber_services(subscriber_id, service_id)
-		SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM telecom.subscriber_services
-		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL)`, subscriberID, serviceID)
+		if !existingConnectedAt.Valid {
+			if !active {
+				return nil, object.NewError(409, "CONFLICT", "Услуга недоступна")
+			}
+			if blocked {
+				return nil, object.NewError(409, "NUMBER_BLOCKED", "Номер заблокирован")
+			}
+			if _, err = tx.ExecContext(ctx, `INSERT INTO telecom.subscriber_services(subscriber_id, service_id) VALUES ($1, $2)`, subscriberID, serviceID); err != nil {
+				return nil, fmt.Errorf("%s | service connection failed: %w", op, err)
+			}
+		}
 	} else {
-		_, err = tx.ExecContext(ctx, `UPDATE telecom.subscriber_services SET disconnected_at = now()
-		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL`, subscriberID, serviceID)
+		if _, err = tx.ExecContext(ctx, `UPDATE telecom.subscriber_services SET disconnected_at = now()
+			WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL`, subscriberID, serviceID); err != nil {
+			return nil, fmt.Errorf("%s | service disconnection failed: %w", op, err)
+		}
 	}
-	if err != nil {
-		return nil, fmt.Errorf("%s | service connection failed: %w", op, err)
-	}
+
 	var connectedAt sql.NullTime
 	if err := tx.QueryRowContext(ctx, `SELECT connected_at FROM telecom.subscriber_services
 		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL ORDER BY id DESC LIMIT 1`, subscriberID, serviceID).Scan(&connectedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"telecom/internal/service/admin"
 	"time"
 
 	"telecom/internal/config"
@@ -25,6 +26,7 @@ func main() {
 
 	logger := slogpretty.SetupPrettyLogger()
 	log := logger.With(slog.String("op", op))
+	log.Info("logger is created")
 
 	repository, err := postgres.NewRepository(cfg)
 	if err != nil {
@@ -38,6 +40,7 @@ func main() {
 		auth:    auth.NewService(repository, cfg),
 		cabinet: cabinet.NewService(repository),
 		finance: finance.NewService(repository, cfg),
+		admin:   admin.NewService(repository),
 	}
 	address := fmt.Sprintf("%s:%d", cfg.Host, cfg.Port)
 	server := &http.Server{
@@ -61,6 +64,7 @@ func main() {
 			stop()
 		}
 	}()
+
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
