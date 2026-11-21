@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	const op = "2d2.cmd.2d2.main"
+	const op = "2d2.cmd.telecom.main"
 
 	cfg := config.MustLoad()
 
@@ -74,11 +74,13 @@ func main() {
 }
 
 func runBilling(ctx context.Context, rep *postgres.Repository, log *slog.Logger) {
-	// Internal process, no extra public HTTP endpoint or external scheduler.
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
-		loc, _ := time.LoadLocation("Europe/Minsk")
+		loc, err := time.LoadLocation("Europe/Minsk")
+		if err != nil {
+			loc = time.FixedZone("Europe/Minsk", 3*60*60)
+		}
 		now := time.Now().In(loc)
 		current := now.Format("2006-01")
 		previous := now.AddDate(0, -1, 0).Format("2006-01")

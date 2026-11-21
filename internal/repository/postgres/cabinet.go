@@ -121,14 +121,10 @@ func (r *Repository) UpdateService(ctx context.Context, subscriberID, serviceID 
 	}
 	defer tx.Rollback()
 
-	var blocked bool
-	if err := tx.QueryRowContext(ctx,
-		`SELECT (is_blocked OR admin_blocked) FROM telecom.subscribers WHERE id = $1 FOR UPDATE`,
-		subscriberID,
-	).Scan(&blocked); err != nil {
+	var blocked, adminBlocked bool
+	if err := tx.QueryRowContext(ctx, `SELECT is_blocked, admin_blocked FROM telecom.subscribers WHERE id = $1 FOR UPDATE`, subscriberID).Scan(&blocked, &adminBlocked); err != nil {
 		return nil, fmt.Errorf("%s | subscriber lock failed: %w", op, err)
 	}
-
 	var active bool
 	if err := tx.QueryRowContext(ctx, `SELECT is_active FROM telecom.services WHERE id = $1`, serviceID).Scan(&active); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -136,33 +132,24 @@ func (r *Repository) UpdateService(ctx context.Context, subscriberID, serviceID 
 		}
 		return nil, fmt.Errorf("%s | service lookup failed: %w", op, err)
 	}
-
-	var existingConnectedAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `SELECT connected_at FROM telecom.subscriber_services
-		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL ORDER BY id DESC LIMIT 1`, subscriberID, serviceID).Scan(&existingConnectedAt)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%s | existing connection lookup failed: %w", op, err)
+	if enabled && !active {
+		return nil, object.NewError(409, "CONFLICT", "Услуга недоступна")
+	}
+	if enabled && (blocked || adminBlocked) {
+		return nil, object.NewError(409, "NUMBER_BLOCKED", "Номер заблокирован")
 	}
 
 	if enabled {
-		if !existingConnectedAt.Valid {
-			if !active {
-				return nil, object.NewError(409, "CONFLICT", "Услуга недоступна")
-			}
-			if blocked {
-				return nil, object.NewError(409, "NUMBER_BLOCKED", "Номер заблокирован")
-			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO telecom.subscriber_services(subscriber_id, service_id) VALUES ($1, $2)`, subscriberID, serviceID); err != nil {
-				return nil, fmt.Errorf("%s | service connection failed: %w", op, err)
-			}
-		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO telecom.subscriber_services(subscriber_id, service_id)
+		SELECT $1, $2 WHERE NOT EXISTS (SELECT 1 FROM telecom.subscriber_services
+		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL)`, subscriberID, serviceID)
 	} else {
-		if _, err = tx.ExecContext(ctx, `UPDATE telecom.subscriber_services SET disconnected_at = now()
-			WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL`, subscriberID, serviceID); err != nil {
-			return nil, fmt.Errorf("%s | service disconnection failed: %w", op, err)
-		}
+		_, err = tx.ExecContext(ctx, `UPDATE telecom.subscriber_services SET disconnected_at = now()
+		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL`, subscriberID, serviceID)
 	}
-
+	if err != nil {
+		return nil, fmt.Errorf("%s | service connection failed: %w", op, err)
+	}
 	var connectedAt sql.NullTime
 	if err := tx.QueryRowContext(ctx, `SELECT connected_at FROM telecom.subscriber_services
 		WHERE subscriber_id = $1 AND service_id = $2 AND disconnected_at IS NULL ORDER BY id DESC LIMIT 1`, subscriberID, serviceID).Scan(&connectedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
